@@ -1,56 +1,94 @@
 import streamlit as st
-from openai import OpenAI
+import pandas as pd
+import yfinance as yf
+import numpy as np
+import requests
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+# --- KONFIGURASI TELEGRAM ---
+TOKEN = "8608017703:AAH6fxUlgxup-ejAQS1JsEeMIEwaqikocmg"
+CHAT_ID = "7472978130"
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={CHAT_ID}&text={message}"
+    try:
+        requests.get(url)
+    except:
+        pass
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# --- KONFIGURASI HALAMAN ---
+st.set_page_config(page_title="Charis Quant Scanner", layout="wide")
+st.title("🚀 Indo-Stock Physics Scanner")
+st.subheader("Analisis Z-Score & Volume Momentum (Bursa Efek Indonesia)")
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Daftar Saham Pilihan (LQ45 & Bluechip)
+tickers = [
+    'BBCA.JK', 'BBRI.JK', 'BMRI.JK', 'BBNI.JK', 'TLKM.JK', 
+    'ASII.JK', 'GOTO.JK', 'ADRO.JK', 'UNTR.JK', 'AMRT.JK', 
+    'PGAS.JK', 'ANTM.JK', 'INCO.JK', 'BRIS.JK', 'ICBP.JK'
+]
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+@st.cache_data(ttl=3600) # Update data setiap jam
+def get_stock_data(ticker_list):
+    df_close = yf.download(ticker_list, period="60d")['Close']
+    df_vol = yf.download(ticker_list, period="60d")['Volume']
+    return df_close, df_vol
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+try:
+    close_data, vol_data = get_stock_data(tickers)
+    
+    # Perhitungan Statistik (Window 20 Hari)
+    window = 20
+    ma = close_data.rolling(window=window).mean()
+    std = close_data.rolling(window=window).std()
+    z_score = (close_data - ma) / std
+    
+    vol_ma = vol_data.rolling(window=window).mean()
+    vol_ratio = vol_data / vol_ma
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # Ambil Data Terbaru
+    res_list = []
+    for ticker in tickers:
+        z = z_score[ticker].iloc[-1]
+        vr = vol_ratio[ticker].iloc[-1]
+        price = close_data[ticker].iloc[-1]
+        
+        # Logika Strategi
+        if z < -2 and vr > 1.5:
+            status = "🔥 STRONG BUY (Accumulation)"
+            # Kirim Notifikasi jika terdeteksi Strong Buy
+            send_telegram(f"📢 SINYAL POSITIF!\nSaham: {ticker}\nHarga: Rp{price}\nZ-Score: {round(z,2)}\nVol Ratio: {round(vr,2)}x\nIndikasi: Akumulasi Besar!")
+        elif z < -2:
+            status = "Buy (Oversold)"
+        elif z > 2 and vr > 1.5:
+            status = "⚠️ STRONG SELL (Distribution)"
+        elif z > 2:
+            status = "Sell (Overbought)"
+        else:
+            status = "Neutral"
+            
+        res_list.append({
+            'Ticker': ticker.replace('.JK', ''),
+            'Price': price,
+            'Z-Score': round(z, 2),
+            'Vol Ratio': round(vr, 2),
+            'Recommendation': status
+        })
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+    # Tampilkan Tabel
+    df_final = pd.DataFrame(res_list)
+    
+    # Styling Tabel
+    def color_rec(val):
+        color = 'white'
+        if 'STRONG BUY' in val: color = '#2ecc71'
+        elif 'STRONG SELL' in val: color = '#e74c3c'
+        elif 'Buy' in val: color = '#d4efdf'
+        elif 'Sell' in val: color = '#fadbd8'
+        return f'background-color: {color}; color: black'
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+    st.dataframe(df_final.style.applymap(color_rec, subset=['Recommendation']), use_container_width=True)
+    
+    st.success("Scanner aktif. Jika muncul sinyal 'Strong Buy', notifikasi akan masuk ke Telegram Anda secara otomatis.")
+
+except Exception as e:
+    st.error(f"Koneksi data terputus: {e}")
