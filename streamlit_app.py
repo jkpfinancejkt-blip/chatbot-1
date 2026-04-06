@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
+import yfinance as yf # type: ignore
 import numpy as np
 import requests
 
